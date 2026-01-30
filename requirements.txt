@@ -10,3 +10,5 @@ albumentations
 tqdm
 python-dotenv
 pytest
+timm
+
