@@ -13,3 +13,5 @@ models/outputs/
 
 # Notebooks
 .ipynb_checkpoints/
+
+outputs/
