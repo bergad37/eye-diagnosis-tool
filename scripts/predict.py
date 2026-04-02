@@ -1,26 +1,9 @@
-
 import os
-import sys
 import numpy as np
-import json
-import csv
 from datetime import datetime
-
-try:
-    import joblib
-except ModuleNotFoundError:
-    sys.exit(
-        "joblib is not available. "
-        "Make sure you run the script with the project's virtual environment "
-        "(e.g. `source venv/bin/activate`) or install dependencies with "
-        "`pip install -r requirements.txt`."
-    )
-
 from pathlib import Path
 from PIL import Image
-from collections import Counter
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import joblib
 
 from src.utils.feature_extractor import RETFoundExtractor
 from src.models.retfound import RETFoundLoader
@@ -30,14 +13,7 @@ from src.models.retfound import RETFoundLoader
 # -------------------
 MODEL_PATH = "models/aptos_classifier.pkl"
 SCALER_PATH = "models/scaler.pkl"
-TEST_IMAGES_DIR = "data/aptos/test_images/"
-OUTPUT_DIR = "outputs/reports/"
-EXPORT_JSON = True   # Set False to skip JSON export
-EXPORT_CSV  = True   # Set False to skip CSV export
 
-# -------------------
-# DR Clinical Reference Data
-# -------------------
 severity_map = {
     0: "No DR",
     1: "Mild NPDR",
@@ -97,206 +73,149 @@ risk_level = {
     4: "CRITICAL"
 }
 
-CONFIDENCE_THRESHOLD = 0.60  # Flag predictions below this as uncertain
+followup_timeline = {
+    0: "12 months",
+    1: "12 months",
+    2: "6 months",
+    3: "1–2 months (urgent)",
+    4: "Immediate"
+}
+
+referral_required = {
+    0: False,
+    1: False,
+    2: True,
+    3: True,
+    4: True
+}
+
+CONFIDENCE_THRESHOLD = 0.60
 
 # -------------------
-# Helpers
+# LOAD MODELS ONCE
 # -------------------
+print("🚀 Loading models...")
 
-def format_separator(char="─", width=60):
-    return char * width
-
-def confidence_bar(prob, width=20):
-    """Simple ASCII confidence bar."""
-    filled = int(prob * width)
-    return f"[{'█' * filled}{'░' * (width - filled)}] {prob*100:5.1f}%"
-
-def print_image_report(img_file, pred, proba, stage_labels):
-    confidence = proba[pred]
-    uncertain = confidence < CONFIDENCE_THRESHOLD
-
-    print(format_separator())
-    print(f"  Image : {img_file}")
-    print(f"  Stage : {pred} — {severity_map[pred]}")
-    print(f"  Risk  : {risk_level[pred]}")
-    print(f"  {'⚠ LOW CONFIDENCE — interpret with caution' if uncertain else ''}")
-    print()
-    print("  Clinical Summary:")
-    print(f"    {clinical_description[pred]}")
-    print()
-    print("  Probability Distribution:")
-    for i, label in stage_labels.items():
-        marker = " ◄" if i == pred else ""
-        print(f"    {label:<20} {confidence_bar(proba[i])}{marker}")
-    print()
-    print("  Recommendations:")
-    for rec in recommendations[pred]:
-        print(f"    • {rec}")
-    print()
-
-def build_record(img_file, pred, proba):
-    return {
-        "image": img_file,
-        "predicted_stage": int(pred),
-        "predicted_label": severity_map[pred],
-        "risk_level": risk_level[pred],
-        "confidence": float(round(proba[pred], 4)),
-        "low_confidence_flag": bool(proba[pred] < CONFIDENCE_THRESHOLD),
-        "probabilities": {severity_map[i]: float(round(proba[i], 4)) for i in range(5)},
-        "clinical_summary": clinical_description[pred],
-        "recommendations": recommendations[pred],
-        "timestamp": datetime.now().isoformat()
-    }
-
-def print_summary(records):
-    print(format_separator("═"))
-    print("  BATCH SUMMARY")
-    print(format_separator("═"))
-
-    preds = [r["predicted_stage"] for r in records]
-    confs = [r["confidence"] for r in records]
-    flagged = [r for r in records if r["low_confidence_flag"]]
-
-    count = Counter(preds)
-    print(f"  Total images processed : {len(records)}")
-    print(f"  Mean confidence        : {np.mean(confs)*100:.1f}%")
-    print(f"  Low-confidence flags   : {len(flagged)}")
-    print()
-    print("  Stage Distribution:")
-    for stage in sorted(count):
-        bar_len = int((count[stage] / len(records)) * 30)
-        print(f"    {severity_map[stage]:<22} {'█' * bar_len} {count[stage]}")
-
-    if flagged:
-        print()
-        print("  ⚠  Images Flagged for Review:")
-        for r in flagged:
-            print(f"    • {r['image']}  (confidence {r['confidence']*100:.1f}%)")
-
-    critical = [r for r in records if r["predicted_stage"] == 4]
-    urgent   = [r for r in records if r["predicted_stage"] == 3]
-    if critical:
-        print()
-        print("  🚨 CRITICAL — Immediate Referral Required:")
-        for r in critical:
-            print(f"    • {r['image']}")
-    if urgent:
-        print()
-        print("  ⚠  HIGH RISK — Urgent Ophthalmology Referral:")
-        for r in urgent:
-            print(f"    • {r['image']}")
-
-    print(format_separator("═"))
-
-def export_json(records, output_dir):
-    path = os.path.join(output_dir, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    with open(path, "w") as f:
-        json.dump(records, f, indent=2)
-    print(f"  JSON report saved → {path}")
-
-def export_csv(records, output_dir):
-    path = os.path.join(output_dir, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-    fieldnames = [
-        "image", "predicted_stage", "predicted_label", "risk_level",
-        "confidence", "low_confidence_flag",
-        "prob_No DR", "prob_Mild NPDR", "prob_Moderate NPDR",
-        "prob_Severe NPDR", "prob_Proliferative DR",
-        "timestamp"
-    ]
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in records:
-            row = {
-                "image": r["image"],
-                "predicted_stage": r["predicted_stage"],
-                "predicted_label": r["predicted_label"],
-                "risk_level": r["risk_level"],
-                "confidence": r["confidence"],
-                "low_confidence_flag": r["low_confidence_flag"],
-                "timestamp": r["timestamp"],
-            }
-            for label, prob in r["probabilities"].items():
-                row[f"prob_{label}"] = prob
-            writer.writerow(row)
-    print(f"  CSV report saved  → {path}")
-
-# -------------------
-# Main
-# -------------------
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-print(format_separator("═"))
-print("  DR DIAGNOSIS TOOL — Batch Inference")
-print(f"  Run time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print(format_separator("═"))
-
-# Load model + scaler
-clf    = joblib.load(MODEL_PATH)
+clf = joblib.load(MODEL_PATH)
 scaler = joblib.load(SCALER_PATH)
 
-# Verify predict_proba is available
-if not hasattr(clf, "predict_proba"):
-    sys.exit(
-        "The loaded classifier does not support predict_proba(). "
-        "Re-train with a model that outputs probabilities (e.g. RandomForest, "
-        "LogisticRegression, GradientBoosting) or set probability=True for SVC."
-    )
-
-print(f"  Model loaded  : {MODEL_PATH}")
-print(f"  Scaler loaded : {SCALER_PATH} (expects {scaler.n_features_in_} features)")
-
-# Load RETFound
 weights = Path("models/checkpoints/retfound_cfp_vit_large_clean.pth")
-loader  = RETFoundLoader(weights, device="cpu")
+loader = RETFoundLoader(weights, device="cpu")
 retfound_model = loader.load()
 extractor = RETFoundExtractor(retfound_model)
 
-# -------------------
-# Extract features
-# -------------------
-image_files = sorted(os.listdir(TEST_IMAGES_DIR))
-X_test = []
+print("✅ Models loaded successfully")
 
-print(f"\n  Processing {len(image_files)} image(s) from {TEST_IMAGES_DIR}\n")
-
-for img_file in image_files:
-    img_path = os.path.join(TEST_IMAGES_DIR, img_file)
-    img = Image.open(img_path).convert("RGB")
-    features = extractor.extract(np.array(img))
-    features = np.array(features).flatten()
-    X_test.append(features)
-
-X_test = np.array(X_test)
-X_test_scaled = scaler.transform(X_test)
 
 # -------------------
-# Predict
+# MAIN FUNCTION (API READY)
 # -------------------
-y_pred  = clf.predict(X_test_scaled)
-y_proba = clf.predict_proba(X_test_scaled)   # shape: (n_images, 5)
+def run_prediction(image_path):
+    try:
+        # Load and process image
+        img = Image.open(image_path).convert("RGB")
+        features = extractor.extract(np.array(img))
+        features = np.array(features).flatten().reshape(1, -1)
+        features_scaled = scaler.transform(features)
+
+        # Predict
+        pred = int(clf.predict(features_scaled)[0])
+        proba = clf.predict_proba(features_scaled)[0]
+        confidence = float(proba[pred])
+
+        # Build ranked probability list (highest → lowest)
+        ranked_probs = sorted(
+            [
+                {
+                    "stage": i,
+                    "label": severity_map[i],
+                    "probability": float(round(proba[i], 4)),
+                    "is_prediction": i == pred
+                }
+                for i in range(len(proba))
+            ],
+            key=lambda x: x["probability"],
+            reverse=True
+        )
+
+        # Second-highest probability stage (differential)
+        differential = next((r for r in ranked_probs if r["stage"] != pred), None)
+
+        return {
+            # --- Core prediction ---
+            "image": os.path.basename(image_path),
+            "timestamp": datetime.now().isoformat(),
+
+            # --- Diagnosis ---
+            "diagnosis": {
+                "predicted_stage": pred,
+                "predicted_label": severity_map[pred],
+                "risk_level": risk_level[pred],
+                "clinical_summary": clinical_description[pred],
+            },
+
+            # --- Confidence & uncertainty ---
+            "confidence": {
+                "score": round(confidence, 4),
+                "percentage": round(confidence * 100, 1),
+                "low_confidence_flag": confidence < CONFIDENCE_THRESHOLD,
+                "interpretation": (
+                    "Low confidence — interpret with caution and consider manual review."
+                    if confidence < CONFIDENCE_THRESHOLD
+                    else "Confident prediction."
+                )
+            },
+
+            # --- Probability breakdown ---
+            "probabilities": {
+                "by_stage": {severity_map[i]: float(round(proba[i], 4)) for i in range(len(proba))},
+                "ranked": ranked_probs,
+                "differential_diagnosis": {
+                    "stage": differential["stage"],
+                    "label": differential["label"],
+                    "probability": differential["probability"]
+                } if differential else None
+            },
+
+            # --- Clinical guidance ---
+            "clinical_guidance": {
+                "recommendations": recommendations[pred],
+                "followup_timeline": followup_timeline[pred],
+                "referral_required": referral_required[pred],
+                "referral_urgency": (
+                    "IMMEDIATE" if pred == 4
+                    else "URGENT" if pred == 3
+                    else "ROUTINE" if pred == 2
+                    else "NOT REQUIRED"
+                )
+            },
+
+            # --- Alert flags (useful for API consumers to trigger UI alerts) ---
+            "alerts": {
+                "critical": pred == 4,
+                "urgent": pred == 3,
+                "low_confidence": confidence < CONFIDENCE_THRESHOLD,
+                "requires_immediate_action": pred >= 3
+            }
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "image": os.path.basename(str(image_path)),
+            "timestamp": datetime.now().isoformat()
+        }
+
 
 # -------------------
-# Per-image report
+# OPTIONAL CLI SUPPORT
 # -------------------
-records = []
-print("\n  PER-IMAGE REPORTS\n")
+if __name__ == "__main__":
+    import sys
+    import json
 
-for img_file, pred, proba in zip(image_files, y_pred, y_proba):
-    print_image_report(img_file, pred, proba, severity_map)
-    records.append(build_record(img_file, pred, proba))
-
-# -------------------
-# Batch summary
-# -------------------
-print_summary(records)
-
-# -------------------
-# Export
-# -------------------
-print()
-if EXPORT_JSON:
-    export_json(records, OUTPUT_DIR)
-if EXPORT_CSV:
-    export_csv(records, OUTPUT_DIR)
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <image_path>")
+    else:
+        result = run_prediction(sys.argv[1])
+        print(json.dumps(result, indent=2))
