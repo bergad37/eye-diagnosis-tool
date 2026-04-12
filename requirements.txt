@@ -14,4 +14,4 @@ tqdm
 python-dotenv
 pytest
 timm
-
+huggingface_hub

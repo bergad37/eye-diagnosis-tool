@@ -8,9 +8,10 @@ def main():
     weights_path = project_root / "artifacts" / "models" / "retfound.pth"
     
     loader = RETFoundLoader(
-        weights_path=weights_path,
-        device="cpu"
-    )
+    repo_id="gadbertrand/retfound-eye-diagnosis",
+    filename="retfound_cfp_vit_large_clean.pth",
+    device="cpu"
+)
 
     model = loader.load()
     print("RETFound loaded:", type(model))
