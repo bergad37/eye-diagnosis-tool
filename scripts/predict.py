@@ -11,9 +11,17 @@ from src.models.retfound import RETFoundLoader
 # -------------------
 # Config
 # -------------------
-MODEL_PATH = "models/aptos_classifier.pkl"
-SCALER_PATH = "models/scaler.pkl"
+BASE_DIR = Path(__file__).resolve().parent.parent
 
+MODEL_PATH = BASE_DIR / "models/aptos_classifier.pkl"
+SCALER_PATH = BASE_DIR / "models/scaler.pkl"
+WEIGHTS_PATH = BASE_DIR / "models/checkpoints/retfound_cfp_vit_large_clean.pth"
+
+CONFIDENCE_THRESHOLD = 0.60
+
+# -------------------
+# Clinical mappings
+# -------------------
 severity_map = {
     0: "No DR",
     1: "Mild NPDR",
@@ -24,45 +32,18 @@ severity_map = {
 
 clinical_description = {
     0: "No signs of diabetic retinopathy detected.",
-    1: "Microaneurysms only. Early signs of diabetic retinopathy present.",
-    2: "More than just microaneurysms but less than severe NPDR. "
-       "Hard exudates, cotton-wool spots, or venous beading may be present.",
-    3: "Severe NPDR: extensive intraretinal hemorrhages, venous beading, "
-       "or intraretinal microvascular abnormalities (IRMA).",
-    4: "Proliferative DR: neovascularization or vitreous/pre-retinal hemorrhage present. "
-       "High risk of vision loss."
+    1: "Microaneurysms only. Early signs present.",
+    2: "Moderate NPDR with exudates or cotton-wool spots.",
+    3: "Severe NPDR with hemorrhages or IRMA.",
+    4: "Proliferative DR with neovascularization. High risk of vision loss."
 }
 
 recommendations = {
-    0: [
-        "Routine annual diabetic eye exam recommended.",
-        "Maintain good glycemic and blood pressure control.",
-        "No immediate ophthalmic intervention required."
-    ],
-    1: [
-        "Follow-up eye exam in 12 months.",
-        "Optimize blood glucose (HbA1c < 7%) and blood pressure control.",
-        "Patient education on diabetes management and eye health."
-    ],
-    2: [
-        "Follow-up eye exam in 6 months.",
-        "Referral to ophthalmologist for evaluation.",
-        "Strict glycemic and blood pressure management.",
-        "Consider fluorescein angiography if clinically indicated."
-    ],
-    3: [
-        "Urgent ophthalmology referral within 1–2 months.",
-        "Pan-retinal photocoagulation (PRP) may be indicated.",
-        "Intensive glycemic and systemic risk factor management.",
-        "Regular monitoring for progression to PDR."
-    ],
-    4: [
-        "URGENT: Immediate ophthalmology referral required.",
-        "Pan-retinal photocoagulation (PRP) or anti-VEGF therapy likely needed.",
-        "Vitrectomy may be required if vitreous hemorrhage is present.",
-        "Strict systemic control critical to prevent further progression.",
-        "Patient counseling on risk of severe vision loss."
-    ]
+    0: ["Annual eye exam.", "Maintain glucose & BP control."],
+    1: ["Follow-up in 12 months.", "Optimize diabetes management."],
+    2: ["Follow-up in 6 months.", "Refer to ophthalmologist."],
+    3: ["Urgent referral (1–2 months).", "Consider PRP treatment."],
+    4: ["IMMEDIATE referral.", "Anti-VEGF or surgery may be needed."]
 }
 
 risk_level = {
@@ -77,7 +58,7 @@ followup_timeline = {
     0: "12 months",
     1: "12 months",
     2: "6 months",
-    3: "1–2 months (urgent)",
+    3: "1–2 months",
     4: "Immediate"
 }
 
@@ -89,41 +70,62 @@ referral_required = {
     4: True
 }
 
-CONFIDENCE_THRESHOLD = 0.60
+# -------------------
+# Lazy-loaded globals
+# -------------------
+clf = None
+scaler = None
+extractor = None
+
+
+def load_models():
+    """
+    Load models only once (lazy loading).
+    Prevents Render startup timeout.
+    """
+    global clf, scaler, extractor
+
+    if clf is None:
+        print("🚀 Loading models...")
+
+        # Load ML components
+        clf = joblib.load(MODEL_PATH)
+        scaler = joblib.load(SCALER_PATH)
+
+        # Load RETFound model
+        loader = RETFoundLoader(
+            weights_path=str(WEIGHTS_PATH),
+            device="cpu"
+        )
+
+        retfound_model = loader.load()
+        extractor = RETFoundExtractor(retfound_model)
+
+        print("✅ Models loaded successfully")
+
 
 # -------------------
-# LOAD MODELS ONCE
+# Prediction function
 # -------------------
-print("🚀 Loading models...")
-
-clf = joblib.load(MODEL_PATH)
-scaler = joblib.load(SCALER_PATH)
-
-weights = Path("models/checkpoints/retfound_cfp_vit_large_clean.pth")
-loader = RETFoundLoader(weights, device="cpu")
-retfound_model = loader.load()
-extractor = RETFoundExtractor(retfound_model)
-
-print("✅ Models loaded successfully")
-
-
-# -------------------
-# MAIN FUNCTION (API READY)
-# -------------------
-def run_prediction(image_path):
+def run_prediction(image_path: str):
     try:
-        # Load and process image
+        # Ensure models are loaded
+        load_models()
+
+        # Load image
         img = Image.open(image_path).convert("RGB")
+
+        # Feature extraction
         features = extractor.extract(np.array(img))
         features = np.array(features).flatten().reshape(1, -1)
         features_scaled = scaler.transform(features)
 
-        # Predict
+        # Prediction
         pred = int(clf.predict(features_scaled)[0])
         proba = clf.predict_proba(features_scaled)[0]
         confidence = float(proba[pred])
 
-        # Build ranked probability list (highest → lowest)
+        # Ranked probabilities
         ranked_probs = sorted(
             [
                 {
@@ -138,15 +140,14 @@ def run_prediction(image_path):
             reverse=True
         )
 
-        # Second-highest probability stage (differential)
-        differential = next((r for r in ranked_probs if r["stage"] != pred), None)
+        differential = next(
+            (r for r in ranked_probs if r["stage"] != pred), None
+        )
 
         return {
-            # --- Core prediction ---
             "image": os.path.basename(image_path),
             "timestamp": datetime.now().isoformat(),
 
-            # --- Diagnosis ---
             "diagnosis": {
                 "predicted_stage": pred,
                 "predicted_label": severity_map[pred],
@@ -154,30 +155,32 @@ def run_prediction(image_path):
                 "clinical_summary": clinical_description[pred],
             },
 
-            # --- Confidence & uncertainty ---
             "confidence": {
                 "score": round(confidence, 4),
                 "percentage": round(confidence * 100, 1),
                 "low_confidence_flag": confidence < CONFIDENCE_THRESHOLD,
                 "interpretation": (
-                    "Low confidence — interpret with caution and consider manual review."
+                    "Low confidence — manual review recommended."
                     if confidence < CONFIDENCE_THRESHOLD
                     else "Confident prediction."
                 )
             },
 
-            # --- Probability breakdown ---
             "probabilities": {
-                "by_stage": {severity_map[i]: float(round(proba[i], 4)) for i in range(len(proba))},
+                "by_stage": {
+                    severity_map[i]: float(round(proba[i], 4))
+                    for i in range(len(proba))
+                },
                 "ranked": ranked_probs,
-                "differential_diagnosis": {
-                    "stage": differential["stage"],
-                    "label": differential["label"],
-                    "probability": differential["probability"]
-                } if differential else None
+                "differential_diagnosis": (
+                    {
+                        "stage": differential["stage"],
+                        "label": differential["label"],
+                        "probability": differential["probability"]
+                    } if differential else None
+                )
             },
 
-            # --- Clinical guidance ---
             "clinical_guidance": {
                 "recommendations": recommendations[pred],
                 "followup_timeline": followup_timeline[pred],
@@ -190,7 +193,6 @@ def run_prediction(image_path):
                 )
             },
 
-            # --- Alert flags (useful for API consumers to trigger UI alerts) ---
             "alerts": {
                 "critical": pred == 4,
                 "urgent": pred == 3,
@@ -208,7 +210,7 @@ def run_prediction(image_path):
 
 
 # -------------------
-# OPTIONAL CLI SUPPORT
+# CLI support
 # -------------------
 if __name__ == "__main__":
     import sys
