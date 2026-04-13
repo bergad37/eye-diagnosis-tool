@@ -1,13 +1,20 @@
 from fastapi import FastAPI, UploadFile, File
 import os
 from scripts.predict import run_prediction
+import uuid
+
 
 app = FastAPI()
 
+@app.get("/")
+def home():
+    return {"status": "running"}
+
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    file_path = f"temp/{file.filename}"
+    os.makedirs("temp", exist_ok=True)
 
+    file_path = f"temp/{uuid.uuid4()}.jpg"
     with open(file_path, "wb") as f:
         f.write(await file.read())
 
