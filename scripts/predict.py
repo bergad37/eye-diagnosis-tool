@@ -2,6 +2,7 @@ import os
 import numpy as np
 from datetime import datetime
 from pathlib import Path
+import time
 from PIL import Image
 import joblib
 
@@ -78,6 +79,11 @@ scaler = None
 extractor = None
 
 
+def _log(msg: str):
+    # Render can buffer stdout; force flush so logs appear immediately.
+    print(msg, flush=True)
+
+
 def load_models():
     """
     Load models only once (lazy loading).
@@ -86,34 +92,45 @@ def load_models():
     global clf, scaler, extractor
 
     if clf is None:
-        print("🚀 Loading models...")
+        t0 = time.time()
+        _log("🚀 Loading models...")
 
         # Load ML components
+        _log(f"📦 Loading classifier from {MODEL_PATH}")
         clf = joblib.load(MODEL_PATH)
+        _log(f"📦 Loading scaler from {SCALER_PATH}")
         scaler = joblib.load(SCALER_PATH)
 
         # Ensure Hugging Face cache is writable on Render.
         # Render filesystems are ephemeral; /tmp is a safe writable location.
         os.environ.setdefault("HF_HOME", "/tmp/huggingface")
         os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/tmp/huggingface/hub")
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
         # Load RETFound model (prefer local weights if present; otherwise download)
         if WEIGHTS_PATH.exists():
+            _log(f"📁 Loading RETFound weights from local file {WEIGHTS_PATH}")
             loader = RETFoundLoader(
                 weights_path=str(WEIGHTS_PATH),
                 device="cpu",
             )
         else:
+            _log(
+                "⬇️ Local RETFound weights not found; downloading from Hugging Face "
+                "(gadbertrand/retfound-eye-diagnosis)"
+            )
             loader = RETFoundLoader(
                 repo_id="gadbertrand/retfound-eye-diagnosis",
                 filename="retfound_cfp_vit_large_clean.pth",
                 device="cpu",
             )
 
+        _log("🧠 Loading RETFound model (this can take a while)...")
         retfound_model = loader.load()
+        _log("🧩 Initializing feature extractor...")
         extractor = RETFoundExtractor(retfound_model)
 
-        print("✅ Models loaded successfully")
+        _log(f"✅ Models loaded successfully in {time.time() - t0:.2f}s")
 
 
 # -------------------
@@ -121,18 +138,24 @@ def load_models():
 # -------------------
 def run_prediction(image_path: str):
     try:
+        t0 = time.time()
         # Ensure models are loaded
         load_models()
 
         # Load image
+        _log("🖼️ Reading input image...")
         img = Image.open(image_path).convert("RGB")
 
         # Feature extraction
+        _log("🧬 Extracting features...")
+        t_feat = time.time()
         features = extractor.extract(np.array(img))
+        _log(f"🧬 Feature extraction done in {time.time() - t_feat:.2f}s")
         features = np.array(features).flatten().reshape(1, -1)
         features_scaled = scaler.transform(features)
 
         # Prediction
+        _log("🔮 Running classifier prediction...")
         pred = int(clf.predict(features_scaled)[0])
         proba = clf.predict_proba(features_scaled)[0]
         confidence = float(proba[pred])
@@ -159,6 +182,7 @@ def run_prediction(image_path: str):
         return {
             "image": os.path.basename(image_path),
             "timestamp": datetime.now().isoformat(),
+            "runtime_seconds": round(time.time() - t0, 3),
 
             "diagnosis": {
                 "predicted_stage": pred,
@@ -214,10 +238,11 @@ def run_prediction(image_path: str):
         }
 
     except Exception as e:
+        _log(f"❌ Prediction error: {e}")
         return {
             "error": str(e),
             "image": os.path.basename(str(image_path)),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
 
 

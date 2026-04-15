@@ -36,6 +36,7 @@ def healthz():
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
+    import asyncio
     os.makedirs("temp", exist_ok=True)
 
     file_path = f"temp/{uuid.uuid4()}.jpg"
@@ -46,7 +47,8 @@ async def predict(file: UploadFile = File(...)):
     # Import here so the web server can start/bind quickly even if
     # ML dependencies are heavy or fail to load at boot time.
     from scripts.predict import run_prediction
-    result = run_prediction(file_path)
+    # Run CPU-heavy work off the event loop to avoid the server appearing hung.
+    result = await asyncio.to_thread(run_prediction, file_path)
 
     os.remove(file_path)
 
