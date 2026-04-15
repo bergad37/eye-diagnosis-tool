@@ -3,6 +3,7 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 import time
+import faulthandler
 from PIL import Image
 import joblib
 
@@ -92,6 +93,20 @@ def load_models():
         t0 = time.time()
         _log("🚀 Loading models...")
 
+        # Avoid OpenMP/BLAS oversubscription/hangs on small instances.
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+        # If something hangs, dump stack traces to logs periodically.
+        # (Helps pinpoint whether we're stuck importing sklearn, reading files, etc.)
+        try:
+            faulthandler.enable(all_threads=True)
+            faulthandler.dump_traceback_later(120, repeat=True)
+        except Exception:
+            pass
+
         _log("🐍 Importing ML modules...")
         t_imp = time.time()
         # Import heavy deps lazily so we can see where startup stalls on Render.
@@ -108,6 +123,10 @@ def load_models():
             f"📦 Loading classifier from {MODEL_PATH}"
             + (f" ({clf_size/1024/1024:.1f} MB)" if clf_size is not None else "")
         )
+        _log("📦 Importing scikit-learn (needed for unpickling)...")
+        t_skl = time.time()
+        import sklearn  # noqa: F401
+        _log(f"✅ scikit-learn import done in {time.time() - t_skl:.2f}s")
         t_clf = time.time()
         clf = joblib.load(MODEL_PATH)
         _log(f"✅ Classifier loaded in {time.time() - t_clf:.2f}s")
