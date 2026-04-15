@@ -96,10 +96,29 @@ def load_models():
         _log("🚀 Loading models...")
 
         # Load ML components
-        _log(f"📦 Loading classifier from {MODEL_PATH}")
+        try:
+            clf_size = MODEL_PATH.stat().st_size
+        except Exception:
+            clf_size = None
+        _log(
+            f"📦 Loading classifier from {MODEL_PATH}"
+            + (f" ({clf_size/1024/1024:.1f} MB)" if clf_size is not None else "")
+        )
+        t_clf = time.time()
         clf = joblib.load(MODEL_PATH)
-        _log(f"📦 Loading scaler from {SCALER_PATH}")
+        _log(f"✅ Classifier loaded in {time.time() - t_clf:.2f}s")
+
+        try:
+            scaler_size = SCALER_PATH.stat().st_size
+        except Exception:
+            scaler_size = None
+        _log(
+            f"📦 Loading scaler from {SCALER_PATH}"
+            + (f" ({scaler_size/1024/1024:.1f} MB)" if scaler_size is not None else "")
+        )
+        t_scaler = time.time()
         scaler = joblib.load(SCALER_PATH)
+        _log(f"✅ Scaler loaded in {time.time() - t_scaler:.2f}s")
 
         # Ensure Hugging Face cache is writable on Render.
         # Render filesystems are ephemeral; /tmp is a safe writable location.

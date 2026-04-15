@@ -16,12 +16,19 @@ async def startup_event():
     if not preload:
         return
 
-    try:
-        from scripts.predict import load_models
-        load_models()
-    except Exception as e:
-        # Don't crash the web process; prediction endpoint will surface errors if any.
-        print(f"⚠️ Model preload skipped due to error: {e}")
+    # Warm models in the background so the server binds fast and requests
+    # don't hit Gunicorn timeouts on first inference.
+    import asyncio
+
+    async def _warm():
+        try:
+            from scripts.predict import load_models
+            await asyncio.to_thread(load_models)
+        except Exception as e:
+            # Don't crash the web process; prediction endpoint will surface errors if any.
+            print(f"⚠️ Model warmup failed: {e}", flush=True)
+
+    asyncio.create_task(_warm())
 
 
 @app.get("/")
