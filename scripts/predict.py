@@ -81,7 +81,7 @@ extractor = None
 def load_models():
     """
     Load models only once (lazy loading).
-    Prevents Render startup timeout.
+    On Render, keep startup fast by loading on first request.
     """
     global clf, scaler, extractor
 
@@ -92,11 +92,23 @@ def load_models():
         clf = joblib.load(MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
 
-        # Load RETFound model
-        loader = RETFoundLoader(
-            weights_path=str(WEIGHTS_PATH),
-            device="cpu"
-        )
+        # Ensure Hugging Face cache is writable on Render.
+        # Render filesystems are ephemeral; /tmp is a safe writable location.
+        os.environ.setdefault("HF_HOME", "/tmp/huggingface")
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/tmp/huggingface/hub")
+
+        # Load RETFound model (prefer local weights if present; otherwise download)
+        if WEIGHTS_PATH.exists():
+            loader = RETFoundLoader(
+                weights_path=str(WEIGHTS_PATH),
+                device="cpu",
+            )
+        else:
+            loader = RETFoundLoader(
+                repo_id="gadbertrand/retfound-eye-diagnosis",
+                filename="retfound_cfp_vit_large_clean.pth",
+                device="cpu",
+            )
 
         retfound_model = loader.load()
         extractor = RETFoundExtractor(retfound_model)
