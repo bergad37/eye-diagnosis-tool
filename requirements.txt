@@ -1,20 +1,25 @@
-fastapi
-uvicorn
-gunicorn
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==22.0.0
+
+# ML stack (pin to wheel-available versions for Python 3.11 on Render)
+numpy==1.26.4
+scipy==1.11.4
+scikit-learn==1.4.2
+joblib==1.4.2
+
 torch
 torchvision
-numpy
-opencv-python
-opencv-python-headless
-Pillow
-matplotlib
-scikit-learn
-joblib
-pandas
-albumentations
-tqdm
-python-dotenv
-pytest
 timm
 huggingface_hub
-python-multipart
+
+# Image/IO
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+python-multipart==0.0.9
+
+# Utilities
+pandas==2.2.2
+albumentations==1.4.14
+tqdm==4.66.5
+python-dotenv==1.0.1
