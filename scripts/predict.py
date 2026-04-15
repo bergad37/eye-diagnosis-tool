@@ -6,9 +6,6 @@ import time
 from PIL import Image
 import joblib
 
-from src.utils.feature_extractor import RETFoundExtractor
-from src.models.retfound import RETFoundLoader
-
 # -------------------
 # Config
 # -------------------
@@ -94,6 +91,13 @@ def load_models():
     if clf is None:
         t0 = time.time()
         _log("🚀 Loading models...")
+
+        _log("🐍 Importing ML modules...")
+        t_imp = time.time()
+        # Import heavy deps lazily so we can see where startup stalls on Render.
+        from src.models.retfound import RETFoundLoader
+        from src.utils.feature_extractor import RETFoundExtractor
+        _log(f"🐍 Imports completed in {time.time() - t_imp:.2f}s")
 
         # Load ML components
         try:
