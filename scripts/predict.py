@@ -239,8 +239,16 @@ def load_models():
         t_skl = time.time()
         import sklearn  # noqa: F401
         _log(f"✅ scikit-learn import done in {time.time() - t_skl:.2f}s")
+
+        def _patch_classifier(obj: Any) -> Any:
+            # Patch minimal attributes for runtime safety across sklearn pickle versions.
+            if hasattr(obj, "__class__") and obj.__class__.__name__ == "LogisticRegression":
+                if not hasattr(obj, "multi_class"):
+                    setattr(obj, "multi_class", "multinomial")
+            return obj
+
         t_clf = time.time()
-        clf = joblib.load(MODEL_PATH)
+        clf = _patch_classifier(joblib.load(MODEL_PATH))
         _log(f"✅ Classifier loaded in {time.time() - t_clf:.2f}s")
 
         try:
