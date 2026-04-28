@@ -6,6 +6,11 @@ import time
 import faulthandler
 from PIL import Image
 import joblib
+import requests
+from dotenv import load_dotenv
+from typing import Any, Optional, Union, cast
+
+load_dotenv()
 
 # -------------------
 # Config
@@ -17,6 +22,21 @@ SCALER_PATH = BASE_DIR / "models/scaler.pkl"
 WEIGHTS_PATH = BASE_DIR / "models/checkpoints/retfound_cfp_vit_large_clean.pth"
 
 CONFIDENCE_THRESHOLD = 0.60
+
+# Remote inference (recommended for Render Free tier)
+RETFOUND_REMOTE_URL = os.getenv("RETFOUND_REMOTE_URL", "").strip().rstrip("/")
+RETFOUND_REMOTE_TOKEN = os.getenv("RETFOUND_REMOTE_TOKEN", "").strip()
+RETFOUND_REMOTE_TIMEOUT_S = float(os.getenv("RETFOUND_REMOTE_TIMEOUT_S", "60"))
+RETFOUND_HF_REPO_ID = os.getenv("RETFOUND_HF_REPO_ID", "gadbertrand/retfound-eye-diagnosis").strip()
+RETFOUND_HF_FILENAME = os.getenv("RETFOUND_HF_FILENAME", "retfound_cfp_vit_large_clean.pth").strip()
+
+# Render free tier typically has 512MB RAM; local RETFound is likely to OOM.
+IS_RENDER = bool(os.getenv("RENDER")) or bool(os.getenv("RENDER_SERVICE_ID"))
+ALLOW_LOCAL_RETF0UND_ON_RENDER = os.getenv("ALLOW_LOCAL_RETFOUND_ON_RENDER", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 # -------------------
 # Clinical mappings
@@ -72,14 +92,108 @@ referral_required = {
 # -------------------
 # Lazy-loaded globals
 # -------------------
-clf = None
-scaler = None
-extractor = None
+clf: Any = None
+scaler: Any = None
+# Either the string literal "remote" or a local RETFoundExtractor instance.
+extractor: Optional[Union[str, Any]] = None
 
 
 def _log(msg: str):
     # Render can buffer stdout; force flush so logs appear immediately.
     print(msg, flush=True)
+
+
+def _extract_features_remote(pil_image: Image.Image) -> np.ndarray:
+    if not RETFOUND_REMOTE_URL:
+        raise RuntimeError(
+            "RETFOUND_REMOTE_URL is not set. On Render Free tier, RETFound must be offloaded."
+        )
+
+    headers = {}
+    if RETFOUND_REMOTE_TOKEN:
+        headers["Authorization"] = f"Bearer {RETFOUND_REMOTE_TOKEN}"
+
+    import io
+
+    buf = io.BytesIO()
+    pil_image.save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+
+    url = f"{RETFOUND_REMOTE_URL}/extract"
+    _log(f"🌐 Calling remote feature extractor: {url}")
+    resp = requests.post(
+        url,
+        headers=headers,
+        files={"file": ("image.jpg", buf, "image/jpeg")},
+        timeout=RETFOUND_REMOTE_TIMEOUT_S,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    feats = data.get("features")
+    if not isinstance(feats, list) or not feats:
+        raise RuntimeError(f"Remote extractor returned invalid payload keys={list(data.keys())}")
+    return np.asarray(feats, dtype=np.float32)
+
+
+def _load_local_extractor():
+    from src.models.retfound import RETFoundLoader
+    from src.utils.feature_extractor import RETFoundExtractor
+
+    if WEIGHTS_PATH.exists():
+        _log(f"📁 Using local RETFound weights: {WEIGHTS_PATH}")
+        loader = RETFoundLoader(weights_path=str(WEIGHTS_PATH), device="cpu")
+    elif RETFOUND_HF_REPO_ID and RETFOUND_HF_FILENAME:
+        _log(
+            "⬇️ Local RETFound weights not found; downloading from "
+            f"{RETFOUND_HF_REPO_ID}/{RETFOUND_HF_FILENAME}"
+        )
+        loader = RETFoundLoader(
+            repo_id=RETFOUND_HF_REPO_ID,
+            filename=RETFOUND_HF_FILENAME,
+            device="cpu",
+        )
+    else:
+        raise RuntimeError(
+            "Local RETFound fallback is enabled, but no checkpoint is available. "
+            "Set RETFOUND_REMOTE_URL, place weights at "
+            f"{WEIGHTS_PATH}, or configure RETFOUND_HF_REPO_ID and "
+            "RETFOUND_HF_FILENAME."
+        )
+
+    return RETFoundExtractor(loader.load())
+
+
+def _extract_features_local(pil_image: Image.Image) -> np.ndarray:
+    if extractor is None or extractor == "remote":
+        raise RuntimeError("Local RETFound extractor is not initialized.")
+    local_extractor = cast(Any, extractor)
+    return np.asarray(local_extractor.extract(pil_image), dtype=np.float32)
+
+
+def _extract_features(pil_image: Image.Image) -> np.ndarray:
+    if extractor == "remote":
+        return _extract_features_remote(pil_image)
+    return _extract_features_local(pil_image)
+
+
+def _init_retfound_extractor():
+    if RETFOUND_REMOTE_URL:
+        _log(f"✅ Using remote RETFound feature extractor: {RETFOUND_REMOTE_URL}")
+        return "remote"
+
+    if IS_RENDER and not ALLOW_LOCAL_RETF0UND_ON_RENDER:
+        raise RuntimeError(
+            "RETFOUND_REMOTE_URL is not set. On Render Free tier (512MB), "
+            "RETFound must be offloaded to a remote extractor service. "
+            "Set RETFOUND_REMOTE_URL (and optional RETFOUND_REMOTE_TOKEN), "
+            "or set ALLOW_LOCAL_RETFOUND_ON_RENDER=1 if you know your instance has enough RAM."
+        )
+
+    _log("🧠 RETFOUND_REMOTE_URL not set; falling back to local RETFound extractor")
+    t_ret = time.time()
+    local = _load_local_extractor()
+    _log(f"✅ Local RETFound extractor loaded in {time.time() - t_ret:.2f}s")
+    return local
 
 
 def load_models():
@@ -109,9 +223,7 @@ def load_models():
 
         _log("🐍 Importing ML modules...")
         t_imp = time.time()
-        # Import heavy deps lazily so we can see where startup stalls on Render.
-        from src.models.retfound import RETFoundLoader
-        from src.utils.feature_extractor import RETFoundExtractor
+        # Import only what we need for sklearn inference.
         _log(f"🐍 Imports completed in {time.time() - t_imp:.2f}s")
 
         # Load ML components
@@ -143,34 +255,7 @@ def load_models():
         scaler = joblib.load(SCALER_PATH)
         _log(f"✅ Scaler loaded in {time.time() - t_scaler:.2f}s")
 
-        # Ensure Hugging Face cache is writable on Render.
-        # Render filesystems are ephemeral; /tmp is a safe writable location.
-        os.environ.setdefault("HF_HOME", "/tmp/huggingface")
-        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/tmp/huggingface/hub")
-        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-
-        # Load RETFound model (prefer local weights if present; otherwise download)
-        if WEIGHTS_PATH.exists():
-            _log(f"📁 Loading RETFound weights from local file {WEIGHTS_PATH}")
-            loader = RETFoundLoader(
-                weights_path=str(WEIGHTS_PATH),
-                device="cpu",
-            )
-        else:
-            _log(
-                "⬇️ Local RETFound weights not found; downloading from Hugging Face "
-                "(gadbertrand/retfound-eye-diagnosis)"
-            )
-            loader = RETFoundLoader(
-                repo_id="gadbertrand/retfound-eye-diagnosis",
-                filename="retfound_cfp_vit_large_clean.pth",
-                device="cpu",
-            )
-
-        _log("🧠 Loading RETFound model (this can take a while)...")
-        retfound_model = loader.load()
-        _log("🧩 Initializing feature extractor...")
-        extractor = RETFoundExtractor(retfound_model)
+        extractor = _init_retfound_extractor()
 
         _log(f"✅ Models loaded successfully in {time.time() - t0:.2f}s")
 
@@ -191,15 +276,15 @@ def run_prediction(image_path: str):
         # Feature extraction
         _log("🧬 Extracting features...")
         t_feat = time.time()
-        features = extractor.extract(np.array(img))
+        features = _extract_features(img)
         _log(f"🧬 Feature extraction done in {time.time() - t_feat:.2f}s")
         features = np.array(features).flatten().reshape(1, -1)
-        features_scaled = scaler.transform(features)
+        features_scaled = cast(Any, scaler).transform(features)
 
         # Prediction
         _log("🔮 Running classifier prediction...")
-        pred = int(clf.predict(features_scaled)[0])
-        proba = clf.predict_proba(features_scaled)[0]
+        pred = int(cast(Any, clf).predict(features_scaled)[0])
+        proba = cast(Any, clf).predict_proba(features_scaled)[0]
         confidence = float(proba[pred])
 
         # Ranked probabilities
@@ -220,6 +305,13 @@ def run_prediction(image_path: str):
         differential = next(
             (r for r in ranked_probs if r["stage"] != pred), None
         )
+        referral_urgency = "NOT REQUIRED"
+        if pred == 4:
+            referral_urgency = "IMMEDIATE"
+        elif pred == 3:
+            referral_urgency = "URGENT"
+        elif pred == 2:
+            referral_urgency = "ROUTINE"
 
         return {
             "image": os.path.basename(image_path),
@@ -263,12 +355,7 @@ def run_prediction(image_path: str):
                 "recommendations": recommendations[pred],
                 "followup_timeline": followup_timeline[pred],
                 "referral_required": referral_required[pred],
-                "referral_urgency": (
-                    "IMMEDIATE" if pred == 4
-                    else "URGENT" if pred == 3
-                    else "ROUTINE" if pred == 2
-                    else "NOT REQUIRED"
-                )
+                "referral_urgency": referral_urgency
             },
 
             "alerts": {

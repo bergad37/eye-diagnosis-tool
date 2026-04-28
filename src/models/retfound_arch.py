@@ -13,7 +13,7 @@ class RETFoundOrdinal(nn.Module):
         hidden_dim: optional hidden layer before ordinal head
         """
         super().__init__()
-        self.backbone = backbone or vit_large_patch16()
+        self.backbone = backbone or vit_large_patch16(pretrained=False)
 
         # ordinal head: num_stages-1 thresholds
         self.ordinal_head = nn.Sequential(

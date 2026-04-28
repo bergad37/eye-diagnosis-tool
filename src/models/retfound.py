@@ -26,19 +26,20 @@ class RETFoundLoader:
         self.model = None
 
     def load(self):
-        print("🚀 Loading RETFound model...")
+        print("🚀 Loading RETFound model...", flush=True)
 
         # ✅ Decide source
         if self.weights_path:
-            print("📁 Loading from local file...")
+            print(f"📁 Loading RETFound weights from local file: {self.weights_path}", flush=True)
             weights_path = self.weights_path
 
         elif self.repo_id and self.filename:
-            print("⬇️ Downloading from HuggingFace...")
+            print(f"⬇️ Downloading RETFound weights from Hugging Face: {self.repo_id}/{self.filename}", flush=True)
             weights_path = hf_hub_download(
                 repo_id=self.repo_id,
-                filename=self.filename
+                filename=self.filename,
             )
+            print(f"✅ Download complete: {weights_path}", flush=True)
 
         else:
             raise ValueError(
@@ -46,8 +47,10 @@ class RETFoundLoader:
             )
 
         # ✅ Build model
-        model = build_retfound_model()
+        # Avoid extra timm pretrained download; we load our own checkpoint.
+        model = build_retfound_model(pretrained=False)
 
+        print("📦 Loading checkpoint with torch.load...", flush=True)
         checkpoint = torch.load(weights_path, map_location=self.device)
 
         state_dict = checkpoint.get("model", checkpoint)
@@ -59,5 +62,5 @@ class RETFoundLoader:
 
         self.model = model
 
-        print("✅ Model loaded successfully")
+        print("✅ Model loaded successfully", flush=True)
         return model
