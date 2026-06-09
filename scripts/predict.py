@@ -30,6 +30,8 @@ RETFOUND_REMOTE_TIMEOUT_S = float(os.getenv("RETFOUND_REMOTE_TIMEOUT_S", "60"))
 RETFOUND_HF_REPO_ID = os.getenv("RETFOUND_HF_REPO_ID", "gadbertrand/retfound-eye-diagnosis").strip()
 RETFOUND_HF_FILENAME = os.getenv("RETFOUND_HF_FILENAME", "retfound_cfp_vit_large_clean.pth").strip()
 
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
 # Render free tier typically has 512MB RAM; local RETFound is likely to OOM.
 IS_RENDER = bool(os.getenv("RENDER")) or bool(os.getenv("RENDER_SERVICE_ID"))
 ALLOW_LOCAL_RETF0UND_ON_RENDER = os.getenv("ALLOW_LOCAL_RETFOUND_ON_RENDER", "0").lower() in {
@@ -88,6 +90,47 @@ referral_required = {
     3: True,
     4: True
 }
+
+# -------------------
+# AI recommendations
+# -------------------
+def _generate_ai_recommendations(pred: int, confidence: float, referral_urgency: str) -> list:
+    """Call Claude to generate contextual recommendations. Falls back to hardcoded on any failure."""
+    if not ANTHROPIC_API_KEY:
+        return recommendations[pred]
+
+    try:
+        import anthropic
+        import json as _json
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        prompt = (
+            f"You are a clinical ophthalmology assistant. Generate 2-4 concise clinical "
+            f"recommendations based on this diabetic retinopathy screening result.\n\n"
+            f"Diagnosis: {severity_map[pred]} (Stage {pred}/4)\n"
+            f"Clinical findings: {clinical_description[pred]}\n"
+            f"Risk level: {risk_level[pred]}\n"
+            f"AI confidence: {round(confidence * 100, 1)}%\n"
+            f"Follow-up timeline: {followup_timeline[pred]}\n"
+            f"Referral required: {'Yes' if referral_required[pred] else 'No'} ({referral_urgency})\n\n"
+            f"Return ONLY a JSON array of 2-4 short action strings (under 15 words each). "
+            f"Example: [\"Annual dilated eye exam.\", \"Optimize HbA1c and blood pressure control.\"]"
+        )
+
+        message = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = message.content[0].text.strip()
+        recs = _json.loads(text)
+        if isinstance(recs, list) and recs and all(isinstance(r, str) for r in recs):
+            return recs
+    except Exception as e:
+        _log(f"⚠️ AI recommendations unavailable, using defaults: {e}")
+
+    return recommendations[pred]
+
 
 # -------------------
 # Lazy-loaded globals
@@ -203,7 +246,7 @@ def load_models():
     """
     global clf, scaler, extractor
 
-    if clf is None:
+    if clf is None or extractor is None:
         t0 = time.time()
         _log("🚀 Loading models...")
 
@@ -360,7 +403,7 @@ def run_prediction(image_path: str):
             },
 
             "clinical_guidance": {
-                "recommendations": recommendations[pred],
+                "recommendations": _generate_ai_recommendations(pred, confidence, referral_urgency),
                 "followup_timeline": followup_timeline[pred],
                 "referral_required": referral_required[pred],
                 "referral_urgency": referral_urgency
